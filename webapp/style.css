@@ -356,6 +356,10 @@ html, body {
   z-index: 50;
 }
 
+.sheet-overlay[hidden] {
+  display: none;
+}
+
 .sheet {
   width: 100%;
   max-height: 80vh;
