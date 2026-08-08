@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Битвы</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <h1>Битвы</h1>
+    <div class="balance-pill" id="balancePill">
+      <span class="ton-icon">◆</span><span id="balanceValue">0</span>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="active">Активные</button>
+    <button class="tab" data-tab="history">История</button>
+    <button class="tab" data-tab="mine">Мои битвы</button>
+  </nav>
+
+  <main class="content">
+    <button class="btn-primary btn-create" id="createBattleBtn">Создать битву</button>
+
+    <div id="battleList" class="battle-list"></div>
+
+    <div id="emptyState" class="empty-state" hidden>
+      <p>Пока тут пусто</p>
+      <span>Создайте битву или дождитесь соперника</span>
+    </div>
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-item active" data-nav="battles">
+      <span class="nav-icon">⚔️</span><span>Битвы</span>
+    </button>
+    <button class="nav-item" data-nav="slots">
+      <span class="nav-icon">🎰</span><span>Слоты</span>
+    </button>
+    <button class="nav-item" data-nav="jackpot">
+      <span class="nav-icon">🎉</span><span>Джекпот</span>
+    </button>
+    <button class="nav-item" data-nav="inventory">
+      <span class="nav-icon">🎒</span><span>Инвентарь</span>
+    </button>
+    <button class="nav-item" data-nav="profile">
+      <span class="nav-icon">👤</span><span>Профиль</span>
+    </button>
+  </nav>
+</div>
+
+<!-- Модалка выбора подарка для ставки -->
+<div class="sheet-overlay" id="giftSheetOverlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <h2 id="sheetTitle">Выберите подарок</h2>
+      <button class="sheet-close" id="sheetClose">✕</button>
+    </div>
+    <div id="giftGrid" class="gift-grid"></div>
+    <div id="sheetEmpty" class="empty-state" hidden>
+      <p>Нет доступных NFT-подарков</p>
+      <span>Подключите бота как Business-бота в настройках Telegram</span>
+    </div>
+    <button class="btn-primary" id="confirmGiftBtn" disabled>Выбрать</button>
+  </div>
+</div>
+
+<!-- Тост с ошибками/уведомлениями -->
+<div class="toast" id="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

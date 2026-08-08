@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: nft-battle-bot
+    runtime: python
+    plan: starter          # free-план засыпает от простоя и убивает long-polling бота — для боевой работы нужен как минимум Starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: RESULTS_CHANNEL
+        sync: false
+      - key: WEBAPP_URL
+        sync: false
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./data/battles.db
+      - key: ADMIN_IDS
+        sync: false
+    disk:
+      name: battles-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
