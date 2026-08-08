@@ -9,7 +9,12 @@ from app.battles import BattleError, create_battle, join_battle, resolve_battle
 from app.bot import create_bot_and_dispatcher
 from app.config import settings
 from app.database import get_session, init_db
-from app.gifts import list_unique_gifts
+from app.inventory import (
+    InventoryError,
+    item_to_dict,
+    list_user_inventory,
+    withdraw_item,
+)
 from app.models import Battle, BattleParticipant, BattleStatus, User
 from app.telegram_auth import InitDataError, validate_init_data
 
@@ -30,7 +35,6 @@ async def startup():
 
 
 async def get_current_user(authorization: str = Header(default="")) -> User:
-    """Ожидает заголовок: Authorization: tma <initData из Telegram.WebApp.initData>"""
     if not authorization.startswith("tma "):
         raise HTTPException(401, "Нет initData")
     init_data = authorization[4:]
@@ -55,23 +59,13 @@ async def get_current_user(authorization: str = Header(default="")) -> User:
         return user
 
 
-# ---------- Схемы ----------
-
-class GiftSelection(BaseModel):
-    owned_gift_id: str
-    name: str
-    slug: str | None = None
-    thumb_url: str | None = None
-    value_ton: float | None = None
-
-
 class CreateBattleIn(BaseModel):
-    gift: GiftSelection
+    inventory_item_id: int
     max_participants: int = 3
 
 
 class JoinBattleIn(BaseModel):
-    gift: GiftSelection
+    inventory_item_id: int
 
 
 def _battle_to_dict(battle: Battle) -> dict:
@@ -99,12 +93,13 @@ def _battle_to_dict(battle: Battle) -> dict:
     }
 
 
-# ---------- Эндпоинты ----------
-
 @app.get("/api/config")
 async def public_config():
     channel = settings.results_channel.lstrip("@")
-    return {"results_channel": channel}
+    return {
+        "results_channel": channel,
+        "bank_username": settings.bank_username.lstrip("@") if settings.bank_username else "",
+    }
 
 
 @app.get("/api/me")
@@ -116,11 +111,23 @@ async def me(user: User = Depends(get_current_user)):
     }
 
 
-@app.get("/api/gifts")
-async def my_gifts(user: User = Depends(get_current_user)):
-    if not user.business_connection_id or not user.business_rights_ok:
-        raise HTTPException(400, "Business-подключение не настроено или нет нужных прав")
-    return await list_unique_gifts(bot, user.business_connection_id)
+@app.get("/api/inventory")
+async def inventory_list(user: User = Depends(get_current_user)):
+    async with get_session() as session:
+        db_user = await session.get(User, user.id)
+        items = await list_user_inventory(session, db_user, only_available=True)
+        return [item_to_dict(i) for i in items]
+
+
+@app.post("/api/inventory/{item_id}/withdraw")
+async def inventory_withdraw(item_id: int, user: User = Depends(get_current_user)):
+    async with get_session() as session:
+        db_user = await session.get(User, user.id)
+        try:
+            item = await withdraw_item(session, bot, db_user, item_id)
+        except InventoryError as e:
+            raise HTTPException(400, str(e))
+        return item_to_dict(item)
 
 
 @app.get("/api/battles")
@@ -146,9 +153,16 @@ async def battles_create(payload: CreateBattleIn, user: User = Depends(get_curre
     async with get_session() as session:
         db_user = await session.get(User, user.id)
         try:
-            battle = await create_battle(session, db_user, payload.gift.model_dump(), payload.max_participants)
+            battle = await create_battle(
+                session, db_user, payload.inventory_item_id, payload.max_participants
+            )
         except BattleError as e:
             raise HTTPException(400, str(e))
+        battle = await session.get(
+            Battle,
+            battle.id,
+            options=[selectinload(Battle.participants).selectinload(BattleParticipant.user)],
+        )
         return _battle_to_dict(battle)
 
 
@@ -160,13 +174,18 @@ async def battles_join(battle_id: int, payload: JoinBattleIn, user: User = Depen
             raise HTTPException(404, "Битва не найдена")
         db_user = await session.get(User, user.id)
         try:
-            battle = await join_battle(session, battle, db_user, payload.gift.model_dump())
+            battle = await join_battle(session, battle, db_user, payload.inventory_item_id)
         except BattleError as e:
             raise HTTPException(400, str(e))
 
         if battle.status == BattleStatus.RESOLVING:
             battle = await resolve_battle(session, bot, battle)
 
+        battle = await session.get(
+            Battle,
+            battle.id,
+            options=[selectinload(Battle.participants).selectinload(BattleParticipant.user)],
+        )
         return _battle_to_dict(battle)
 
 
@@ -183,5 +202,4 @@ async def battle_detail(battle_id: int, user: User = Depends(get_current_user)):
         return _battle_to_dict(battle)
 
 
-# Отдаём статику мини-аппа
 app.mount("/", StaticFiles(directory="webapp", html=True), name="webapp")

@@ -7,7 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.gifts import transfer_gift
-from app.models import Battle, BattleParticipant, BattleStatus, User
+from app.models import (
+    Battle,
+    BattleParticipant,
+    BattleStatus,
+    InventoryItem,
+    InventoryItemStatus,
+    User,
+)
 
 DICE_EMOJI = "🎲"
 
@@ -22,14 +29,51 @@ async def _next_battle_number(session: AsyncSession) -> int:
     return (current_max or 0) + 1
 
 
+async def _stake_inventory_item(
+    session: AsyncSession,
+    user: User,
+    inventory_item_id: int,
+) -> InventoryItem:
+    """Берёт AVAILABLE-подарок из инвентаря и помечает STAKED."""
+    if not settings.bank_business_connection_id:
+        raise BattleError("Банк подарков не настроен. Обратитесь к администратору.")
+
+    item = await session.get(InventoryItem, inventory_item_id)
+    if item is None or item.user_id != user.id:
+        raise BattleError("Подарок не найден в вашем инвентаре")
+    if item.status != InventoryItemStatus.AVAILABLE:
+        raise BattleError("Этот подарок уже использован или выведен")
+
+    item.status = InventoryItemStatus.STAKED
+    await session.flush()
+    return item
+
+
+def _participant_from_item(
+    battle_id: int,
+    user_id: int,
+    item: InventoryItem,
+) -> BattleParticipant:
+    return BattleParticipant(
+        battle_id=battle_id,
+        user_id=user_id,
+        inventory_item_id=item.id,
+        owned_gift_id=item.owned_gift_id,
+        gift_name=item.gift_name,
+        gift_slug=item.gift_slug,
+        gift_thumb_url=item.gift_thumb_url,
+        gift_value_ton=item.gift_value_ton,
+        business_connection_id=settings.bank_business_connection_id,
+    )
+
+
 async def create_battle(
     session: AsyncSession,
     creator: User,
-    gift: dict,
+    inventory_item_id: int,
     max_participants: int = 3,
 ) -> Battle:
-    if not creator.business_connection_id:
-        raise BattleError("Сначала подключите бота как Business-бота, чтобы ставить NFT-подарки.")
+    item = await _stake_inventory_item(session, creator, inventory_item_id)
 
     battle = Battle(
         number=await _next_battle_number(session),
@@ -40,17 +84,7 @@ async def create_battle(
     session.add(battle)
     await session.flush()
 
-    participant = BattleParticipant(
-        battle_id=battle.id,
-        user_id=creator.id,
-        owned_gift_id=gift["owned_gift_id"],
-        gift_name=gift["name"],
-        gift_slug=gift.get("slug"),
-        gift_thumb_url=gift.get("thumb_url"),
-        gift_value_ton=gift.get("value_ton"),
-        business_connection_id=creator.business_connection_id,
-    )
-    session.add(participant)
+    session.add(_participant_from_item(battle.id, creator.id, item))
     await session.commit()
     await session.refresh(battle)
     return battle
@@ -60,10 +94,8 @@ async def join_battle(
     session: AsyncSession,
     battle: Battle,
     user: User,
-    gift: dict,
+    inventory_item_id: int,
 ) -> Battle:
-    if not user.business_connection_id:
-        raise BattleError("Сначала подключите бота как Business-бота, чтобы ставить NFT-подарки.")
     if battle.status != BattleStatus.OPEN:
         raise BattleError("Эта битва уже недоступна для вступления.")
     if any(p.user_id == user.id for p in battle.participants):
@@ -71,17 +103,8 @@ async def join_battle(
     if len(battle.participants) >= battle.max_participants:
         raise BattleError("В битве уже нет свободных слотов.")
 
-    participant = BattleParticipant(
-        battle_id=battle.id,
-        user_id=user.id,
-        owned_gift_id=gift["owned_gift_id"],
-        gift_name=gift["name"],
-        gift_slug=gift.get("slug"),
-        gift_thumb_url=gift.get("thumb_url"),
-        gift_value_ton=gift.get("value_ton"),
-        business_connection_id=user.business_connection_id,
-    )
-    session.add(participant)
+    item = await _stake_inventory_item(session, user, inventory_item_id)
+    session.add(_participant_from_item(battle.id, user.id, item))
     await session.flush()
     await session.refresh(battle, attribute_names=["participants"])
 
@@ -94,10 +117,10 @@ async def join_battle(
 
 
 async def resolve_battle(session: AsyncSession, bot: Bot, battle: Battle) -> Battle:
-    """Кидает кубики за каждого участника в канал результатов, определяет победителя
-    и переводит подарки проигравших победителю."""
+    """Кубики в канале + transferGift с банка победителю + обновление инвентаря."""
     await session.refresh(battle, attribute_names=["participants"])
     participants = battle.participants
+    bank_conn = settings.bank_business_connection_id
 
     header = await bot.send_message(
         chat_id=settings.results_channel,
@@ -105,17 +128,15 @@ async def resolve_battle(session: AsyncSession, bot: Bot, battle: Battle) -> Bat
         parse_mode="HTML",
     )
 
-    # Кидаем кубики по очереди, значение приходит сразу в ответе на send_dice
     rolls: dict[int, int] = {}
     for p in participants:
         msg = await bot.send_dice(chat_id=settings.results_channel, emoji=DICE_EMOJI)
         rolls[p.id] = msg.dice.value
         p.dice_value = msg.dice.value
-        await asyncio.sleep(3.5)  # даём анимации кубика доиграть перед следующим броском
+        await asyncio.sleep(3.5)
 
     await session.flush()
 
-    # Переброс при ничьей между лидерами
     contenders = participants
     while True:
         best = max(rolls[p.id] for p in contenders)
@@ -139,30 +160,49 @@ async def resolve_battle(session: AsyncSession, bot: Bot, battle: Battle) -> Bat
     battle.resolved_at = datetime.utcnow()
     battle.channel_message_id = header.message_id
 
-    # Передаём подарки проигравших победителю
     winner_user = await session.get(User, winner.user_id)
     results_lines = []
+
     for p in participants:
         mark = "🏆" if p.id == winner.id else "💀"
         results_lines.append(f"{mark} {p.gift_name} — 🎲 {p.dice_value}")
-        if p.id != winner.id:
-            try:
-                await transfer_gift(
-                    bot=bot,
-                    business_connection_id=p.business_connection_id,
-                    owned_gift_id=p.owned_gift_id,
-                    new_owner_telegram_id=winner_user.telegram_id,
-                )
-                p.gift_transferred = True
-            except Exception as e:  # noqa: BLE001
-                results_lines.append(f"   ⚠️ не удалось передать подарок автоматически: {e}")
+
+        inv = None
+        if p.inventory_item_id:
+            inv = await session.get(InventoryItem, p.inventory_item_id)
+
+        if p.id == winner.id:
+            # Победитель: подарок остаётся на банке, возвращаем в его инвентарь
+            if inv:
+                inv.status = InventoryItemStatus.AVAILABLE
+                inv.user_id = winner_user.id
+            continue
+
+        # Проигравший: transfer с банка → победителю в Telegram
+        try:
+            await transfer_gift(
+                bot=bot,
+                business_connection_id=bank_conn or p.business_connection_id,
+                owned_gift_id=p.owned_gift_id,
+                new_owner_telegram_id=winner_user.telegram_id,
+            )
+            p.gift_transferred = True
+            if inv:
+                inv.status = InventoryItemStatus.WITHDRAWN
+                inv.withdrawn_at = datetime.utcnow()
+        except Exception as e:  # noqa: BLE001
+            results_lines.append(f"   ⚠️ не удалось передать подарок: {e}")
+            # При ошибке вернём стейк проигравшему, чтобы не потерять запись
+            if inv and inv.status == InventoryItemStatus.STAKED:
+                inv.status = InventoryItemStatus.AVAILABLE
 
     await bot.send_message(
         chat_id=settings.results_channel,
         text=(
             f"🏆 <b>Битва №{battle.number} завершена!</b>\n\n"
             + "\n".join(results_lines)
-            + f"\n\nПобедитель: @{winner_user.username or winner_user.telegram_id}, забирает все подарки."
+            + f"\n\nПобедитель: @{winner_user.username or winner_user.telegram_id}, "
+            f"подарки проигравших отправлены на аккаунт."
         ),
         parse_mode="HTML",
     )

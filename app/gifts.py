@@ -43,7 +43,7 @@ async def list_unique_gifts(bot: Bot, business_connection_id: str) -> list[dict]
                 # Точной рыночной цены Bot API не отдаёт (это зависит от маркетплейса) —
                 # last_resale хранит последнюю известную цену перепродажи, если есть.
                 "value_ton": getattr(g, "last_resale_amount", None),
-                "transferable": owned.transferable,
+                "transferable": getattr(owned, "can_be_transferred", getattr(owned, "transferable", True)),
             }
         )
     return gifts

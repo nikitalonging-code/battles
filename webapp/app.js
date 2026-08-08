@@ -2,15 +2,17 @@ const tg = window.Telegram?.WebApp;
 tg?.ready();
 tg?.expand();
 
-const API_BASE = ""; // мини-апп и API отдаются с одного домена
+const API_BASE = "";
 
 let state = {
+  nav: "battles",
   tab: "active",
   battles: [],
-  gifts: [],
-  selectedGift: null,
-  sheetMode: null, // "create" | battleId для join
+  inventory: [],
+  selectedItem: null,
+  sheetMode: null,
   resultsChannel: "",
+  bankUsername: "",
 };
 
 function authHeaders() {
@@ -39,36 +41,76 @@ function showToast(text) {
   setTimeout(() => (el.hidden = true), 2800);
 }
 
-// ---------- Рендер списка битв ----------
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
 
 function fmtTon(v) {
   return (v || 0).toFixed(2);
 }
 
+// ---------- Навигация ----------
+
+const SCREEN_TITLES = {
+  battles: "Битвы",
+  slots: "Слоты",
+  jackpot: "Джекпот",
+  inventory: "Инвентарь",
+  profile: "Профиль",
+};
+
+function switchNav(nav) {
+  state.nav = nav;
+  document.querySelectorAll(".nav-item").forEach((el) => {
+    el.classList.toggle("active", el.dataset.nav === nav);
+  });
+  document.querySelectorAll(".screen").forEach((el) => {
+    el.hidden = true;
+  });
+  const screenId = {
+    battles: "screenBattles",
+    slots: "screenSlots",
+    jackpot: "screenJackpot",
+    inventory: "screenInventory",
+    profile: "screenProfile",
+  }[nav];
+  const screen = document.getElementById(screenId);
+  if (screen) screen.hidden = false;
+  document.getElementById("pageTitle").textContent = SCREEN_TITLES[nav] || "Битвы";
+  if (nav === "inventory") loadInventory();
+  if (nav === "battles") loadBattles();
+}
+
+document.querySelector(".bottom-nav").addEventListener("click", (e) => {
+  const btn = e.target.closest(".nav-item");
+  if (!btn) return;
+  switchNav(btn.dataset.nav);
+});
+
+// ---------- Битвы ----------
+
 function renderBattles() {
   const list = document.getElementById("battleList");
   const empty = document.getElementById("emptyState");
   list.innerHTML = "";
-
   if (state.battles.length === 0) {
     empty.hidden = false;
     return;
   }
   empty.hidden = true;
-
-  for (const b of state.battles) {
-    list.appendChild(renderBattleCard(b));
-  }
+  for (const b of state.battles) list.appendChild(renderBattleCard(b));
 }
 
 function renderBattleCard(battle) {
   const card = document.createElement("div");
   card.className = "battle-card";
-
   const creator = battle.participants[0];
   const slots = battle.max_participants;
 
-  // avatars row
   const avatarsHtml = Array.from({ length: slots })
     .map((_, i) => {
       const p = battle.participants[i];
@@ -79,7 +121,6 @@ function renderBattleCard(battle) {
     })
     .join("");
 
-  // gift slots row
   const giftsHtml = Array.from({ length: slots })
     .map((_, i) => {
       const p = battle.participants[i];
@@ -125,8 +166,6 @@ function renderBattleCard(battle) {
   return card;
 }
 
-// ---------- Табы ----------
-
 document.getElementById("tabs").addEventListener("click", (e) => {
   const btn = e.target.closest(".tab");
   if (!btn) return;
@@ -140,10 +179,7 @@ document.getElementById("battleList").addEventListener("click", (e) => {
   const btn = e.target.closest("button[data-action]");
   if (!btn) return;
   const id = Number(btn.dataset.id);
-
-  if (btn.dataset.action === "join") {
-    openGiftSheet(id);
-  }
+  if (btn.dataset.action === "join") openGiftSheet(id);
   if (btn.dataset.action === "check") {
     const msgId = btn.dataset.msg;
     if (!msgId) {
@@ -154,8 +190,6 @@ document.getElementById("battleList").addEventListener("click", (e) => {
     tg?.openTelegramLink ? tg.openTelegramLink(url) : window.open(url, "_blank");
   }
 });
-
-// ---------- Загрузка данных ----------
 
 async function loadBattles() {
   try {
@@ -169,13 +203,89 @@ async function loadBattles() {
 async function loadConfig() {
   try {
     const cfg = await api("/api/config");
-    state.resultsChannel = cfg.results_channel;
-  } catch (e) {
-    /* не критично для рендера */
+    state.resultsChannel = cfg.results_channel || "";
+    state.bankUsername = (cfg.bank_username || "").replace(/^@/, "");
+    updateDepositHint();
+  } catch (e) {}
+}
+
+function updateDepositHint() {
+  const hint = document.getElementById("depositHint");
+  const btn = document.getElementById("bankLinkBtn");
+  if (state.bankUsername) {
+    hint.hidden = false;
+    btn.textContent = "@" + state.bankUsername;
+  } else {
+    hint.hidden = true;
   }
 }
 
-// ---------- Sheet выбора подарка ----------
+document.getElementById("bankLinkBtn")?.addEventListener("click", () => {
+  if (!state.bankUsername) return;
+  const url = `https://t.me/${state.bankUsername}`;
+  tg?.openTelegramLink ? tg.openTelegramLink(url) : window.open(url, "_blank");
+});
+
+// ---------- Инвентарь ----------
+
+async function loadInventory() {
+  try {
+    state.inventory = await api("/api/inventory");
+    renderInventory();
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+function renderInventory() {
+  const list = document.getElementById("inventoryList");
+  const empty = document.getElementById("inventoryEmpty");
+  list.innerHTML = "";
+  if (state.inventory.length === 0) {
+    empty.hidden = false;
+    return;
+  }
+  empty.hidden = true;
+  for (const item of state.inventory) list.appendChild(renderInventoryCard(item));
+}
+
+function renderInventoryCard(item) {
+  const card = document.createElement("div");
+  card.className = "inventory-card";
+  const valueText = item.value_ton != null ? `◆ ${fmtTon(item.value_ton)}` : "NFT";
+  card.innerHTML = `
+    <div class="inventory-thumb">
+      ${item.thumb_url ? `<img src="${item.thumb_url}" alt="">` : "🎁"}
+    </div>
+    <div class="inventory-info">
+      <div class="name">${escapeHtml(item.name || "Подарок")}</div>
+      <div class="meta">${valueText}</div>
+    </div>
+    <button class="btn-withdraw" data-id="${item.id}">Вывести</button>
+  `;
+  card.querySelector(".btn-withdraw").addEventListener("click", (e) => {
+    e.stopPropagation();
+    withdrawItem(item.id, e.currentTarget);
+  });
+  return card;
+}
+
+async function withdrawItem(itemId, btn) {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    await api(`/api/inventory/${itemId}/withdraw`, { method: "POST" });
+    showToast("Подарок отправлен на ваш аккаунт");
+    await loadInventory();
+  } catch (e) {
+    showToast(e.message);
+    btn.disabled = false;
+    btn.textContent = "Вывести";
+  }
+}
+
+// ---------- Sheet: выбор из ИНВЕНТАРЯ для стейка ----------
 
 const overlay = document.getElementById("giftSheetOverlay");
 const giftGrid = document.getElementById("giftGrid");
@@ -183,41 +293,46 @@ const sheetEmpty = document.getElementById("sheetEmpty");
 const confirmBtn = document.getElementById("confirmGiftBtn");
 
 async function openGiftSheet(mode) {
-  state.sheetMode = mode; // "create" или id битвы
-  state.selectedGift = null;
+  state.sheetMode = mode;
+  state.selectedItem = null;
   confirmBtn.disabled = true;
   document.getElementById("sheetTitle").textContent =
-    mode === "create" ? "Выберите подарок для ставки" : "Выберите подарок, чтобы вступить";
+    mode === "create" ? "Выберите подарок из инвентаря" : "Выберите подарок, чтобы вступить";
 
   overlay.hidden = false;
   giftGrid.innerHTML = "";
   sheetEmpty.hidden = true;
 
   try {
-    state.gifts = await api("/api/gifts");
+    state.inventory = await api("/api/inventory");
   } catch (e) {
     overlay.hidden = true;
     showToast(e.message);
     return;
   }
 
-  if (state.gifts.length === 0) {
+  if (state.inventory.length === 0) {
     sheetEmpty.hidden = false;
+    const bank = state.bankUsername ? `@${state.bankUsername}` : "аккаунт-банк";
+    sheetEmpty.innerHTML = `
+      <p>Инвентарь пуст</p>
+      <span>Отправьте NFT-подарок на ${bank}</span>
+    `;
     return;
   }
 
-  for (const g of state.gifts) {
+  for (const item of state.inventory) {
     const card = document.createElement("div");
     card.className = "gift-card";
-    card.dataset.id = g.owned_gift_id;
+    card.dataset.id = item.id;
     card.innerHTML = `
-      ${g.thumb_url ? `<img src="${g.thumb_url}">` : ""}
-      <div class="gift-card-label">${g.name}</div>
+      ${item.thumb_url ? `<img src="${item.thumb_url}">` : ""}
+      <div class="gift-card-label">${escapeHtml(item.name || "Подарок")}</div>
     `;
     card.addEventListener("click", () => {
       document.querySelectorAll(".gift-card").forEach((c) => c.classList.remove("selected"));
       card.classList.add("selected");
-      state.selectedGift = g;
+      state.selectedItem = item;
       confirmBtn.disabled = false;
     });
     giftGrid.appendChild(card);
@@ -228,25 +343,29 @@ document.getElementById("sheetClose").addEventListener("click", () => (overlay.h
 document.getElementById("createBattleBtn").addEventListener("click", () => openGiftSheet("create"));
 
 confirmBtn.addEventListener("click", async () => {
-  if (!state.selectedGift) return;
+  if (!state.selectedItem) return;
   confirmBtn.disabled = true;
   confirmBtn.textContent = "Подождите...";
   try {
     if (state.sheetMode === "create") {
       await api("/api/battles", {
         method: "POST",
-        body: JSON.stringify({ gift: state.selectedGift, max_participants: 3 }),
+        body: JSON.stringify({
+          inventory_item_id: state.selectedItem.id,
+          max_participants: 3,
+        }),
       });
       showToast("Битва создана!");
     } else {
       await api(`/api/battles/${state.sheetMode}/join`, {
         method: "POST",
-        body: JSON.stringify({ gift: state.selectedGift }),
+        body: JSON.stringify({ inventory_item_id: state.selectedItem.id }),
       });
       showToast("Вы вступили в битву!");
     }
     overlay.hidden = true;
     loadBattles();
+    if (state.nav === "inventory") loadInventory();
   } catch (e) {
     showToast(e.message);
   } finally {
@@ -254,8 +373,6 @@ confirmBtn.addEventListener("click", async () => {
     confirmBtn.textContent = "Выбрать";
   }
 });
-
-// ---------- Init ----------
 
 (async function init() {
   await loadConfig();
