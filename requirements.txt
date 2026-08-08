@@ -5,3 +5,4 @@ sqlalchemy[asyncio]==2.0.35
 aiosqlite==0.20.0
 pydantic-settings==2.5.2
 python-dotenv==1.0.1
+telethon>=1.36.0
